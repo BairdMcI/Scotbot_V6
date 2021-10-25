@@ -1,4 +1,6 @@
 import asyncio
+import datetime
+import logging
 from typing import Optional
 
 import aiohttp
@@ -6,9 +8,13 @@ import aiosqlite
 import pandas as pd
 from requests.exceptions import SSLError
 from twitchio.ext import commands
+from twitchio.ext.routines import routine
 
 from twitchBot import Scotbot
 from twitchClasses import Game
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
 class GamesCog(commands.Cog):
@@ -97,8 +103,19 @@ class GamesCog(commands.Cog):
                 await ctx.send(f"!editcom !whatgame DeadM8 is playing the {game.genres} {game.categories} game, {game.name}, developed by {game.developers}. | LINK: "
                                f"store.steampowered.com/app/{game.id}")
             else:
-                await ctx.send(f"@{ctx.author.display_name}, no game with the name '{gameName}' could be found!")
+                await ctx.reply(f"No game with the name '{gameName}' could be found!")
 
+    @commands.command(name="updateGamesList")
+    async def updateGamesListCommand(self, ctx: commands.Context):
+        print("name")
+        await ctx.reply("Give me a sec...")
+        await self.updateGamesList()
+        await ctx.reply("Games list has been updated!")
+
+    @routine(time=datetime.datetime(year=2021, month=1, day=1, hour=7, minute=0))
+    async def updateGamesListRoutine(self):
+        self.bot.logger.info("Updating games list")
+        await self.updateGamesList()
 
 
 def prepare(bot):

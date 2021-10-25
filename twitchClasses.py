@@ -23,7 +23,7 @@ class Giveaway:
         return self.name
 
     async def saveEntrants(self):
-        async with aiosqlite.connect(f"{self.channelName}/{self.channelName}.db") as db:
+        async with aiosqlite.connect(f"data/user_{self.channelName}.db") as db:
             await db.execute("UPDATE giveaways SET entrants=? WHERE keyword = ?", (json.dumps(self.entrants), self.name,))
             await db.commit()
 
@@ -38,7 +38,7 @@ class Giveaway:
         else:
             winner = self.entrants.pop(random.randrange(0, len(self.entrants)))
             self.winners.append(winner)
-            async with aiosqlite.connect(f"{self.channelName}/{self.channelName}.db") as db:
+            async with aiosqlite.connect(f"data/user_{self.channelName}.db") as db:
                 await db.execute("UPDATE giveaways SET winners=? WHERE keyword=?", (json.dumps(self.winners), self.name,))
                 await db.execute("UPDATE giveaways SET entrants=? WHERE keyword = ?", (json.dumps(self.entrants), self.name,))
                 await db.commit()
@@ -47,14 +47,14 @@ class Giveaway:
     async def close(self):
         self.isOpen = False
         await self.saveEntrants()
-        async with aiosqlite.connect(f"{self.channelName}/{self.channelName}.db") as db:
+        async with aiosqlite.connect(f"data/user_{self.channelName}.db") as db:
             await db.execute("UPDATE giveaways SET isOpen=0 WHERE keyword=?", (self.name,))
             await db.commit()
 
         return len(self.entrants) + len(self.winners)
 
     async def addToDB(self, channelName: str):
-        async with aiosqlite.connect(f"data/{channelName}/{channelName}.db") as db:
+        async with aiosqlite.connect(f"data/user_{channelName}.db") as db:
             await db.execute("INSERT OR REPLACE INTO giveaways VALUES (?, '[]', '[]', 1)", (self.name,))
             await db.commit()
 
@@ -73,13 +73,13 @@ class SongRequest:
         return self.song
 
     async def addToDB(self):
-        async with aiosqlite.connect(f"{self.channelName}/{self.channelName}.db") as db:
+        async with aiosqlite.connect(f"data/user_{self.channelName}.db") as db:
             cur = await db.execute("INSERT INTO songs VALUES (?, ?, ?, 0)", (self.requester, self.song, self.requestedAt.strftime("%d/%m/%Y %H:%M:%S"),))
             self.rowID = cur.lastrowid
             await db.commit()
 
     async def play(self):
-        async with aiosqlite.connect(f"{self.channelName}/{self.channelName}.db") as db:
+        async with aiosqlite.connect(f"data/user_{self.channelName}.db") as db:
             await db.execute("UPDATE songs SET played=1 WHERE ROWID=?", (self.rowID,))
             await db.commit()
         self.played = True
@@ -96,14 +96,14 @@ class Poll:
         self.rowid: int = rowid
 
     async def addToDB(self):
-        async with aiosqlite.connect(f"{self.channelName}/{self.channelName}.db") as db:
+        async with aiosqlite.connect(f"data/user_{self.channelName}.db") as db:
             print(self.options)
             cur = await db.execute("INSERT INTO polls VALUES (?, '[]', 1)", (json.dumps(self.options), ))
             await db.commit()
             self.rowid = cur.lastrowid
     
     async def updateDB(self):
-        async with aiosqlite.connect(f"{self.channelName}/{self.channelName}.db") as db:
+        async with aiosqlite.connect(f"data/user_{self.channelName}.db") as db:
             await db.execute("UPDATE polls SET options=?, voters=?, isOpen=? WHERE ROWID=?",
                              (json.dumps(self.options), json.dumps(self.voters), 1 if self.isOpen else 0, self.rowid))
             await db.commit()
@@ -116,17 +116,16 @@ class Poll:
 
 @dataclass
 class Quote:
-    user: str
-    addUser: str
-    quote: str
     submittedAt: datetime
+    submitter: str
+    quote: str
 
     async def addToDB(self, channelName: str) -> Optional[int]:
         quoteCount = None
-        async with aiosqlite.connect(f"data/{channelName}.db") as db:
-            exists = await db.execute("SELECT 1 FROM quotes WHERE user=? AND userAdd=? AND text=?", (self.user, self.addUser, self.quote,))
+        async with aiosqlite.connect(f"data/user_{channelName}.db") as db:
+            exists = await db.execute("SELECT 1 FROM quotes WHERE submitter=? AND quote=?", (self.submitter,  self.quote,))
             if not await exists.fetchone():
-                await db.execute("INSERT INTO quotes VALUES (?, ?, ?, ?)", (self.user, self.addUser, self.quote, self.submittedAt.strftime("%d/%m/%Y %H:%M:%S")))
+                await db.execute("INSERT INTO quotes VALUES (?, ?, ?)", (self.submittedAt.strftime("%d/%m/%Y %H:%M:%S"), self.submitter, self.quote,))
                 cur = await db.execute("SELECT COUNT(*) FROM quotes")
                 quoteCount = await cur.fetchone()
                 quoteCount = quoteCount[0]
@@ -153,6 +152,7 @@ class Channel:
 
         self.poll: Optional[Poll] = None
         self.songs: list = []
+        self.requestsOpen: bool = True
         self.messages: list = []
         self.giveaways: dict = {}
         self.chatLogs: list = []
@@ -166,22 +166,18 @@ class Channel:
         return self.name
 
     def setupTables(self):
-        Path("data/"+self.name).mkdir(exist_ok=True)
-        con = sqlite3.connect(f"data/{self.name}/{self.name}.db")
+        Path("data").mkdir(exist_ok=True)
+        con = sqlite3.connect(f"data/user_{self.name}.db")
         con.execute("CREATE TABLE IF NOT EXISTS giveaways (keyword text unique primary key, entrants text, winners text, isOpen integer)")
         con.execute("CREATE TABLE IF NOT EXISTS polls (options text, voters text, isOpen integer)")
-        con.execute("CREATE TABLE IF NOT EXISTS quotes (user text collate NOCASE, userAdd text collate NOCASE, quote text collate NOCASE , submittedAt text)")
-        con.execute("CREATE TABLE IF NOT EXISTS whatgames (game text collate NOCASE, whatgame text)")
+        con.execute("CREATE TABLE IF NOT EXISTS quotes (submittedAt text, submitter text collate NOCASE, quote text collate NOCASE)")
+        con.execute("CREATE TABLE IF NOT EXISTS whatgames (game text collate NOCASE, title text collate NOCASE, whatgame text collate NOCASE, dateAdded text)")
         con.execute("CREATE TABLE IF NOT EXISTS songs (requester text collate NOCASE, song text collate NOCASE, submittedAt text, played integer)")
-        con.commit()
-        con.close()
-        con = sqlite3.connect(f"data/{self.name}/chatLogs.db")
-        con.execute(f"CREATE TABLE IF NOT EXISTS {datetime.now().strftime('%B')} (date text, user text, message text)")
         con.commit()
         con.close()
 
     def loadFromDB(self):
-        con = sqlite3.connect(f"data/{self.name}/{self.name}.db")
+        con = sqlite3.connect(f"data/user_{self.name}.db")
         data = con.execute("SELECT * FROM giveaways WHERE isOpen=1").fetchall()
         self.giveaways = {giveaway[0]: Giveaway(channelName=self.name, name=giveaway[0], entrants=giveaway[1], winners=giveaway[2]) for giveaway in data}
 
@@ -199,12 +195,12 @@ class Channel:
 
     async def saveChatLogs(self):
         if len(self.chatLogs) > 0:
-            async with aiosqlite.connect(f"data/{self.name}/chatLogs.db") as db:
+            async with aiosqlite.connect(f"data/user_{self.name}.db") as db:
                 try:
-                    await db.executemany(f"INSERT INTO {datetime.now().strftime('%B')} VALUES (?, ?, ?)", self.chatLogs)
+                    await db.executemany(f"INSERT INTO chatLogs_{datetime.today().year} VALUES (?, ?, ?)", self.chatLogs)
                 except sqlite3.OperationalError:
-                    await db.execute(f"CREATE TABLE IF NOT EXISTS {datetime.now().strftime('%B')} (date text, user text, message text)")
-                    await db.executemany(f"INSERT INTO {datetime.now().strftime('%B')} VALUES (?, ?, ?)", self.chatLogs)
+                    await db.execute(f"CREATE TABLE IF NOT EXISTS chatLogs_{datetime.today().year} (date text, user text, message text)")
+                    await db.executemany(f"INSERT INTO chatLogs_{datetime.today().year} VALUES (?, ?, ?)", self.chatLogs)
                 await db.commit()
             self.chatLogs = []
 
@@ -220,8 +216,8 @@ class Channel:
 
         return giveaway
 
-    async def addQuote(self, user: str, userAdd: str, text: str, submittedAt: datetime) -> int:
-        quote = Quote(user, userAdd, text, submittedAt)
+    async def addQuote(self, submittedAt: datetime, submitter: str, text: str) -> int:
+        quote = Quote(submittedAt, submitter, text)
         quoteCount = None
         if self.name in ["akiss4luck", "essentia_modica", "scotbotm8"]:
             names = ["akiss4luck", "essentia_modica", "scotbotm8"]
@@ -234,15 +230,15 @@ class Channel:
         return quoteCount
 
     async def getQuote(self, searchTerm: Optional[str], quoteNum: Optional[int]) -> (Quote, int):
-        async with aiosqlite.connect(f"data/{self.name}/{self.name}.db") as db:
+        async with aiosqlite.connect(f"data/user_{self.name}.db") as db:
             if searchTerm is None:
-                cur = await db.execute("SELECT user, userAdd, quote, submittedAt FROM quotes")
+                cur = await db.execute("SELECT submittedAt, submitter, quote FROM quotes")
                 quotes = await cur.fetchall()
             else:
-                cur = await db.execute("SELECT user, userAdd, quote, submittedAt FROM quotes WHERE user=? OR userAdd=? OR quote LIKE ?",
+                cur = await db.execute("SELECT submittedAt, submitter, quote FROM quotes WHERE submitter=? OR quote LIKE ?",
                                        (searchTerm, searchTerm, "%"+searchTerm+"%"))
                 quotes = await cur.fetchall()
-        quotes = [Quote(quote[0], quote[1], quote[2], datetime.strptime(quote[3], "%d/%m/%Y %H:%M:%S")) for quote in quotes]
+        quotes = [Quote(datetime.strptime(quote[0], "%d/%m/%Y %H:%M:%S"), quote[1], quote[2]) for quote in quotes]
         if quoteNum is None:
             quoteNum = random.randrange(0, len(quotes))
         else:
@@ -251,11 +247,12 @@ class Channel:
 
         return quote, quoteNum+1, len(quotes)
 
-    async def addWhatgame(self, game: str, whatgame: str) -> bool:
-        async with aiosqlite.connect(f"data/{self.name}/{self.name}.db") as db:
-            exists = await db.execute("SELECT 1 FROM whatgames WHERE game=? AND whatgame=?", (game, whatgame, ))
+    async def addWhatgame(self, game: str, title: str, whatgame: str) -> bool:
+        async with aiosqlite.connect(f"data/user_{self.name}.db") as db:
+            dateAdded = datetime.now().strftime("%d/%m/%Y")
+            exists = await db.execute("SELECT 1 FROM whatgames WHERE game=? AND title=? AND whatgame=? AND dateAdded=?", (game, title, whatgame, dateAdded,))
             if not await exists.fetchone():
-                await db.execute("INSERT INTO whatgames VALUES (?, ?)", (game, whatgame,))
+                await db.execute("INSERT INTO whatgames VALUES (?, ?, ?, ?)", (game, title, whatgame, dateAdded,))
                 await db.commit()
                 return True
             else:
