@@ -57,11 +57,11 @@ class GamesCog(commands.Cog):
             steam_spy_page = pd.DataFrame.from_dict(json_data, orient='index')
             steam_spy_all = steam_spy_all.append(steam_spy_page)
         app_list = steam_spy_all[['appid', 'name']].sort_values('appid').reset_index(drop=True)
-        app_list.to_csv("app_list.csv", index=False)
+        app_list.to_csv("data/app_list.csv", index=False)
 
         data = list(app_list.itertuples(index=False, name=None))
 
-        async with aiosqlite.connect("generalTwitchInfo.db") as db:
+        async with aiosqlite.connect("data/generalTwitchInfo.db") as db:
             await db.executemany("INSERT OR REPLACE INTO gameIDs VALUES (?, ?)", data)
             await db.commit()
 
@@ -72,7 +72,7 @@ class GamesCog(commands.Cog):
         if data is not None:
             game: Game = Game(*data)
         else:
-            async with aiosqlite.connect("generalTwitchInfo.db") as db:
+            async with aiosqlite.connect("data/generalTwitchInfo.db") as db:
                 cur = await db.execute("SELECT * FROM gameIDs WHERE gameName LIKE ?", ("%"+gameName+"%",))
                 data = await cur.fetchone()
                 if data is None:

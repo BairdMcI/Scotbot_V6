@@ -32,7 +32,7 @@ scope = ["channel:read:redemptions", "chat:read"]
 
 
 def token_saver(token):
-    with open("twitch_token.json", "w") as f:
+    with open("data/twitch_token.json", "w") as f:
         json.dump(token, f)
 
 
@@ -68,7 +68,7 @@ def validate(oauth: OAuth2Session, channelName, can_refresh=True):
 
 def get_session(client_id, client_secret, redirect_uri, channelName):
     try:
-        with open("twitch_token.json", 'r') as f:
+        with open("data/twitch_token.json", 'r') as f:
             token = json.load(f)
     except (OSError, json.JSONDecodeError, FileNotFoundError):
         print("Failed to load token!")
@@ -84,7 +84,7 @@ def get_session(client_id, client_secret, redirect_uri, channelName):
 
 class Scotbot(commands.Bot, ABC):
     def __init__(self):
-        con = sqlite3.connect("generalTwitchInfo.db")
+        con = sqlite3.connect("data/generalTwitchInfo.db")
         self.channels: dict[str: Channel] = {channel.name: channel for channel in getAllChannelInfo(con)}
         super().__init__(prefix="!",
                          token=twitchToken,

@@ -53,7 +53,7 @@ logging.getLogger("spotipy.client").setLevel(logging.ERROR)
 logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
 logging.getLogger("twitchio.websocket").setLevel(logging.DEBUG)
 logging.getLogger("twitchio.client").setLevel(logging.ERROR)
-logging.basicConfig(filename="logs.log", level=logging.INFO, format='%(asctime)s | %(name)s | %(levelname)s | %(message)s', datefmt='%d/%m/%Y %H:%M:%S')
+logging.basicConfig(filename="data/logs.log", level=logging.INFO, format='%(asctime)s | %(name)s | %(levelname)s | %(message)s', datefmt='%d/%m/%Y %H:%M:%S')
 
 
 def setupLogger(logger):

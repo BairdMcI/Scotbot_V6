@@ -54,7 +54,7 @@ class Giveaway:
         return len(self.entrants) + len(self.winners)
 
     async def addToDB(self, channelName: str):
-        async with aiosqlite.connect(f"{channelName}/{channelName}.db") as db:
+        async with aiosqlite.connect(f"data/{channelName}/{channelName}.db") as db:
             await db.execute("INSERT OR REPLACE INTO giveaways VALUES (?, '[]', '[]', 1)", (self.name,))
             await db.commit()
 
@@ -123,7 +123,7 @@ class Quote:
 
     async def addToDB(self, channelName: str) -> Optional[int]:
         quoteCount = None
-        async with aiosqlite.connect(f"{channelName}/{channelName}.db") as db:
+        async with aiosqlite.connect(f"data/{channelName}.db") as db:
             exists = await db.execute("SELECT 1 FROM quotes WHERE user=? AND userAdd=? AND text=?", (self.user, self.addUser, self.quote,))
             if not await exists.fetchone():
                 await db.execute("INSERT INTO quotes VALUES (?, ?, ?, ?)", (self.user, self.addUser, self.quote, self.submittedAt.strftime("%d/%m/%Y %H:%M:%S")))
@@ -166,8 +166,8 @@ class Channel:
         return self.name
 
     def setupTables(self):
-        Path(self.name).mkdir(exist_ok=True)
-        con = sqlite3.connect(f"{self.name}/{self.name}.db")
+        Path("data/"+self.name).mkdir(exist_ok=True)
+        con = sqlite3.connect(f"data/{self.name}/{self.name}.db")
         con.execute("CREATE TABLE IF NOT EXISTS giveaways (keyword text unique primary key, entrants text, winners text, isOpen integer)")
         con.execute("CREATE TABLE IF NOT EXISTS polls (options text, voters text, isOpen integer)")
         con.execute("CREATE TABLE IF NOT EXISTS quotes (user text collate NOCASE, userAdd text collate NOCASE, quote text collate NOCASE , submittedAt text)")
@@ -175,13 +175,13 @@ class Channel:
         con.execute("CREATE TABLE IF NOT EXISTS songs (requester text collate NOCASE, song text collate NOCASE, submittedAt text, played integer)")
         con.commit()
         con.close()
-        con = sqlite3.connect(f"{self.name}/chatLogs.db")
+        con = sqlite3.connect(f"data/{self.name}/chatLogs.db")
         con.execute(f"CREATE TABLE IF NOT EXISTS {datetime.now().strftime('%B')} (date text, user text, message text)")
         con.commit()
         con.close()
 
     def loadFromDB(self):
-        con = sqlite3.connect(f"{self.name}/{self.name}.db")
+        con = sqlite3.connect(f"data/{self.name}/{self.name}.db")
         data = con.execute("SELECT * FROM giveaways WHERE isOpen=1").fetchall()
         self.giveaways = {giveaway[0]: Giveaway(channelName=self.name, name=giveaway[0], entrants=giveaway[1], winners=giveaway[2]) for giveaway in data}
 
@@ -199,7 +199,7 @@ class Channel:
 
     async def saveChatLogs(self):
         if len(self.chatLogs) > 0:
-            async with aiosqlite.connect(f"{self.name}/chatLogs.db") as db:
+            async with aiosqlite.connect(f"data/{self.name}/chatLogs.db") as db:
                 try:
                     await db.executemany(f"INSERT INTO {datetime.now().strftime('%B')} VALUES (?, ?, ?)", self.chatLogs)
                 except sqlite3.OperationalError:
@@ -234,7 +234,7 @@ class Channel:
         return quoteCount
 
     async def getQuote(self, searchTerm: Optional[str], quoteNum: Optional[int]) -> (Quote, int):
-        async with aiosqlite.connect(f"{self.name}/{self.name}.db") as db:
+        async with aiosqlite.connect(f"data/{self.name}/{self.name}.db") as db:
             if searchTerm is None:
                 cur = await db.execute("SELECT user, userAdd, quote, submittedAt FROM quotes")
                 quotes = await cur.fetchall()
@@ -252,7 +252,7 @@ class Channel:
         return quote, quoteNum+1, len(quotes)
 
     async def addWhatgame(self, game: str, whatgame: str) -> bool:
-        async with aiosqlite.connect(f"{self.name}/{self.name}.db") as db:
+        async with aiosqlite.connect(f"data/{self.name}/{self.name}.db") as db:
             exists = await db.execute("SELECT 1 FROM whatgames WHERE game=? AND whatgame=?", (game, whatgame, ))
             if not await exists.fetchone():
                 await db.execute("INSERT INTO whatgames VALUES (?, ?)", (game, whatgame,))
