@@ -17,7 +17,7 @@ from requests_oauthlib import OAuth2Session
 import twitchio
 import json
 
-from twitchio import models
+from twitchio import models, user
 from twitchio.ext.routines import routine
 
 import logger as _logger
@@ -100,13 +100,12 @@ class Scotbot(commands.Bot, ABC):
                          case_insensitive=True)
         self.pubsub_client = None
         self.logger = LOGGER
-        cogs = [f"{p.parent}.{p.stem}" for p in pathlib.Path("twitch_cogs").glob("*.py")]
+        cogs = [f"{p.parent}.{p.stem}" for p in pathlib.Path("twitch_cogs").glob("*.py") if p.stem != "GamesCog"]
         for cog in cogs:
             self.load_module(cog)
         LOGGER.info(f"Loaded cogs: {'; '.join([cog.split('twitch_cogs.')[1] for cog in cogs])}")
 
     async def event_ready(self):
-        LOGGER.info(f"Scotbot joined Twitch Channels: {'; '.join([*self.channels])}")
         for channel in self.channels.values():
             if len(channel.giveaways) > 0:
                 LOGGER.info(f"{channel.name} has open giveaway(s): {'; '.join([*channel.giveaways])}")
@@ -122,12 +121,31 @@ class Scotbot(commands.Bot, ABC):
             self.loop.create_task(channel.saveChatLogsLoop())
             channel.channelObj = self.get_channel(channel.name)
 
+            rawData = await self.search_channels(channel.name)
+
+            searchResult: user.SearchUser = [result for result in rawData if result.name == channel.name][0]
+
+            channel.displayName = searchResult.display_name
+            channel.thumbnailURL = searchResult.thumbnail_url
+
+            if searchResult.live:
+                liveInfo: list[models.Stream] = await self.fetch_streams([channel.id])
+                streamInfo: models.Stream = liveInfo[0]
+            else:
+                streamInfo: models.ChannelInfo = await self.fetch_channel(channel.name)
+
+            if streamInfo.title != channel.title or streamInfo.game_name != channel.game or searchResult.live != channel.isLive or searchResult.started_at != channel.lastStartedAt:
+                await channel.updateStreamInfo(title=streamInfo.title, game=streamInfo.game_name, online=searchResult.live, lastStartedAt=searchResult.started_at)
+
+        #self.cogs.get("GamesCog").updateGamesListRoutine.start()
+        self.cogs.get("LiveCog").checkIfLiveRoutine.start()
+
         pubsub_sess = get_session(twitchClientID, twitchClientSecret, "https://localhost", "deadm8")
         self.pubsub_client = twitchio.Client(token=pubsub_sess.token['access_token'], initial_channels=['deadm8'], client_secret=twitchClientSecret)
         self.pubsub_client.pubsub = pubsub.PubSubPool(self.pubsub_client)
         self.loop.create_task(self.runPubsub())
+        LOGGER.info(f"Scotbot joined Twitch Channels: {'; '.join([*self.channels])}")
 
-        # self.cogs.get("GamesCog").updateGamesListRoutine.start()
         # await self.pubsub_client.pubsub.subscribe_topics([pubsub.channel_points(self.pubsub_client._http.token)[56403701]])
         # await self.pubsub_client.connect()
 
@@ -186,41 +204,6 @@ class Scotbot(commands.Bot, ABC):
         else:
             LOGGER.error(f"[{ctx.channel.name}] {error}")
             traceback.print_exception(type(error), error, error.__traceback__, file=sys.stderr)
-
-    async def event_raw_usernotice(self, channel, tags: dict):
-        msgID = tags["msg-id"]
-        if msgID == "raid":
-            raiderChannel = tags["display-name"]
-            raiderCount = tags["msg-param-viewerCount"]
-            LOGGER.info(f"{raiderChannel} raided {channel} with {raiderCount} viewers")
-            await channel.send(f"Please welcome the {raiderCount} raiders from {raiderChannel}!")
-
-        elif tags["msg-id"] == "subgift":
-            subGiver = tags["display-name"]
-            subReceiver = tags["msg-param-recipient-display-name"]
-            LOGGER.info(f"Sub gift from {subGiver} to {subReceiver} in '{channel.name}'")
-            await channel.send(f"Thank you to {subGiver} for gifting a sub to {subReceiver}! <3")
-
-        elif tags["msg-id"] == "anonsubgift":
-            subGiver = "Anonymous"
-            subReceiver = tags["msg-param-recipient-display-name"]
-            LOGGER.info(f"Anonymous sub gift to {subReceiver} in '{channel.name}'")
-            await channel.send(f"Thank you to {subGiver} for gifting a sub to {subReceiver}! <3")
-
-        elif tags["msg-id"] == "ritual":
-            newChatter = tags["display-name"]
-            LOGGER.info(f"{newChatter} is new to '{channel.name}'")
-            await channel.send(f"Please welcome @{newChatter} to the channel!")
-
-        elif tags["msg-id"] == "sub":
-            user = tags["display-name"]
-            LOGGER.info(f"{user} subscribed to '{channel.name}'")
-            await channel.send(f"Thanks for the sub @{user}, and welcome tae aw the fun! <3")
-
-        elif tags["msg-id"] == "resub":
-            user = tags["display-name"]
-            LOGGER.info(f"{user} resubscribed to '{channel.name}'")
-            await channel.send(f"Thanks for the {tags['msg-param-cumulative-months']}-month resub, @{user} - Welcome back! <3")
 
 
 if __name__ == "__main__":

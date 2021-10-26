@@ -10,6 +10,10 @@ import aiosqlite
 import twitchio
 import random
 
+from twitchio import models
+from discord import Webhook, RequestsWebhookAdapter, Embed, Colour
+
+botImage = "https://cdn.discordapp.com/attachments/176727246160134144/491033960877391892/ScotBot5Shadow.png"
 
 class Giveaway:
     def __init__(self, name: str, channelName: str, entrants=None, winners=None, isOpen: int = 1):
@@ -98,16 +102,16 @@ class Poll:
     async def addToDB(self):
         async with aiosqlite.connect(f"data/user_{self.channelName}.db") as db:
             print(self.options)
-            cur = await db.execute("INSERT INTO polls VALUES (?, '[]', 1)", (json.dumps(self.options), ))
+            cur = await db.execute("INSERT INTO polls VALUES (?, '[]', 1)", (json.dumps(self.options),))
             await db.commit()
             self.rowid = cur.lastrowid
-    
+
     async def updateDB(self):
         async with aiosqlite.connect(f"data/user_{self.channelName}.db") as db:
             await db.execute("UPDATE polls SET options=?, voters=?, isOpen=? WHERE ROWID=?",
                              (json.dumps(self.options), json.dumps(self.voters), 1 if self.isOpen else 0, self.rowid))
             await db.commit()
-            
+
     async def updateLoop(self):
         while self.isOpen:
             await self.updateDB()
@@ -123,7 +127,7 @@ class Quote:
     async def addToDB(self, channelName: str) -> Optional[int]:
         quoteCount = None
         async with aiosqlite.connect(f"data/user_{channelName}.db") as db:
-            exists = await db.execute("SELECT 1 FROM quotes WHERE submitter=? AND quote=?", (self.submitter,  self.quote,))
+            exists = await db.execute("SELECT 1 FROM quotes WHERE submitter=? AND quote=?", (self.submitter, self.quote,))
             if not await exists.fetchone():
                 await db.execute("INSERT INTO quotes VALUES (?, ?, ?)", (self.submittedAt.strftime("%d/%m/%Y %H:%M:%S"), self.submitter, self.quote,))
                 cur = await db.execute("SELECT COUNT(*) FROM quotes")
@@ -143,12 +147,21 @@ class Game:
 
 
 class Channel:
-    def __init__(self, name: str, id: int, webhookID: str, webhookToken: str, isLive: int):
+    def __init__(self, name: str, id: int, webhookID: int, webhookToken: str, isLive: int, title: str = "", game: str = "", whatgame: str = "", lastStartedAt: datetime = None):
         self.name: str = name
+        self.displayName: str = self.name
         self.id: int = id
-        self.webhookID: str = webhookID
+
+        self.webhookID: int = webhookID
         self.webhookToken: str = webhookToken
+        self.thumbnailURL: str = ""
+        self.gameImageURL: str = ""
+
         self.isLive: bool = isLive == 1
+        self.title: str = title
+        self.game: str = game
+        self.whatgame: str = whatgame
+        self.lastStartedAt: datetime = lastStartedAt
 
         self.poll: Optional[Poll] = None
         self.songs: list = []
@@ -191,6 +204,19 @@ class Channel:
         if data is not None:
             self.songs = [SongRequest(requester=x[1], song=x[2], rowID=x[0], channelName=self.name, requestedAt=datetime.strptime(x[3], "%d/%m/%Y %H:%M:%S"), queuePosition=idx)
                           for idx, x in enumerate(data)]
+        con.close()
+
+        con = sqlite3.connect("data/generalTwitchInfo.db")
+        webhookID, webhookToken, title, game, lastLive = con.execute("SELECT webhookID, webhookToken, title, game, lastStartedAt FROM channelInfo WHERE name=?",
+                                                                     (self.name,)).fetchone()
+        self.webhookID = webhookID
+        self.webhookToken = webhookToken
+        self.title = title
+        self.game = game
+        if lastLive is not None:
+            self.lastStartedAt = datetime.strptime(lastLive[0], "%d/%m/%Y %H:%M:%S")
+        else:
+            self.lastStartedAt = None
         con.close()
 
     async def saveChatLogs(self):
@@ -236,18 +262,19 @@ class Channel:
                 quotes = await cur.fetchall()
             else:
                 cur = await db.execute("SELECT submittedAt, submitter, quote FROM quotes WHERE submitter=? OR quote LIKE ?",
-                                       (searchTerm, searchTerm, "%"+searchTerm+"%"))
+                                       (searchTerm, "%" + searchTerm + "%"))
                 quotes = await cur.fetchall()
-        quotes = [Quote(datetime.strptime(quote[0], "%d/%m/%Y %H:%M:%S"), quote[1], quote[2]) for quote in quotes]
+        quotes = [Quote(datetime.strptime(quote[0], "%d/%m/%Y %H:%M:%S") if quote[0] != "unknown" else datetime(year=1, month=1, day=1), quote[1], quote[2]) for quote in quotes]
         if quoteNum is None:
             quoteNum = random.randrange(0, len(quotes))
         else:
             quoteNum -= 1
         quote = quotes[quoteNum]
 
-        return quote, quoteNum+1, len(quotes)
+        return quote, quoteNum + 1, len(quotes)
 
     async def addWhatgame(self, game: str, title: str, whatgame: str) -> bool:
+        self.whatgame = whatgame
         async with aiosqlite.connect(f"data/user_{self.name}.db") as db:
             dateAdded = datetime.now().strftime("%d/%m/%Y")
             exists = await db.execute("SELECT 1 FROM whatgames WHERE game=? AND title=? AND whatgame=? AND dateAdded=?", (game, title, whatgame, dateAdded,))
@@ -284,3 +311,62 @@ class Channel:
             return nextSong
         else:
             return None
+
+    async def checkIfLive(self, streamInfo: list[models.Stream]) -> list:
+        try:
+            streamInfo: models.Stream = streamInfo[0]
+        except IndexError:
+            # Channel must be offline
+            if self.isLive:
+                await self.updateStreamInfo(online=False)
+                return [-2, 0, 0]
+            return [-1, 0, 0]
+
+        updateLiveStatus = True if not self.isLive else False
+        updateTitle = True if self.title != streamInfo.title else False
+        updateGame = True if self.game != streamInfo.game_name else False
+
+        if any([updateLiveStatus, updateTitle, updateGame]):
+            await self.updateStreamInfo(title=streamInfo.title, game=streamInfo.game_name, online=True, lastStartedAt=datetime.now())
+
+        return [2 if updateLiveStatus else 1, updateTitle, updateGame]
+
+    async def updateStreamInfo(self, title: str = None, game: str = None, online: bool = None, lastStartedAt: datetime = None, gameImage: str = None):
+        if title is not None:
+            self.title = title
+        if game is not None:
+            self.game = game
+            self.gameImageURL = gameImage
+        if online is not None:
+            self.isLive = online
+        if lastStartedAt is not None:
+            self.lastStartedAt = lastStartedAt
+        async with aiosqlite.connect("data/generalTwitchInfo.db") as db:
+            await db.execute("UPDATE channelInfo SET liveStatus=?, title=?, game=?, lastStartedAt=? WHERE name=?",
+                             (1 if self.isLive else 0, self.title, self.game,
+                              self.lastStartedAt.strftime("%d/%m/%Y %H:%M:%S") if self.lastStartedAt is not None else None,
+                              self.name,))
+            await db.commit()
+
+    async def sendWebhook(self, changedGames: bool):
+        if not changedGames:
+            header = f"{self.displayName} has gone live!"
+        else:
+            header = f"{self.displayName} has changed games"
+
+        webhook = Webhook.partial(self.webhookID, self.webhookToken, adapter=RequestsWebhookAdapter())
+        embed = Embed(title=header, description=f"https://www.twitch.tv/{self.displayName}", colour=Colour.purple())
+        embed.add_field(name="Stream Title:", value=self.title, inline=False)
+        embed.add_field(name="Now Playing:", value=self.game, inline=False)
+        embed.set_image(url=self.gameImageURL)
+        embed.set_footer(icon_url=botImage, text="Scotbot - Created by DeadM8 for the QEB Community")
+        embed.set_thumbnail(url=self.thumbnailURL)
+        if changedGames:
+            title = f"{self.name} has changed games..."
+        elif self.name == "quill18":
+            title = f"<@&651408409652101120>, Quill18 has gone live!"
+        elif self.name in ["deadm8", "akiss4luck"]:
+            title = f"@everyone, {self.displayName} has gone live!"
+        else:
+            title = f"{self.displayName} has gone live!"
+        webhook.send(content=title, embed=embed)
