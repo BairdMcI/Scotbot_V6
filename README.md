@@ -1,6 +1,8 @@
-# Scotbot_V6
+# Scotbot V6
 
 A Twitch bot created for the QEB community using Python and the [TwitchIO](https://twitchio.dev/en/stable/) library.
+
+Built asynchronously to be fast yet reliable.
 
 Features include:
 - Logging of chats
