@@ -13,18 +13,21 @@ class QuotesCog(commands.Cog):
 
     @commands.command(name="addQuote")
     async def addQuote(self, ctx: commands.Context, *args):
-        rawData = " ".join(args)
         channel: Channel = self.bot.channels[ctx.channel.name]
-        user = re.search("<(.*)>", args[0])
-        if user is None:
-            await ctx.reply(f"@{ctx.author.display_name}, please enclose the person who said the quote at the start of the quote in < > brackets!")
-            return
-        quote = rawData.split(">")[1].strip(" ")
-        userAddDisplay = ctx.author.display_name
-        submittedAt = datetime.now()
-        quoteNum = await channel.addQuote(submittedAt, userAddDisplay, quote)
+        print("Got here")
+        if ctx.message.tags.get("reply-parent-msg-body") is not None:
+            quote = f"<{ctx.message.tags['reply-parent-display-name']}> {ctx.message.tags['reply-parent-msg-body']}"
+        else:
+            rawData = " ".join(args)
+            user = re.search("<(.*)>", args[0])
+            if user is None:
+                await ctx.reply(f"@{ctx.author.display_name}, please enclose the person who said the quote at the start of the quote in < > brackets!")
+                return
+            quote = rawData
+        quoteNum = await channel.addQuote(datetime.now(), ctx.author.display_name, quote)
+
         if quoteNum is not None:
-            self.bot.logger.info(f"{channel.name} | Quote from {userAddDisplay} added: {quote}")
+            self.bot.logger.info(f"{channel.name} | Quote from {ctx.author.display_name} added: {quote}")
             await ctx.reply(f"Quote has been added to the database! Quote number: {quoteNum}")
 
     @commands.command(name="quote")
@@ -57,8 +60,12 @@ class QuotesCog(commands.Cog):
             except ValueError:
                 pass
 
-        quote, quoteNum, totalQuotes = await channel.getQuote(searchTerm, quoteNum)
-        await ctx.reply(f"{quote.quote} | Submitted By: {quote.submitter} | ({quoteNum}/{totalQuotes})")
+        quoteData = await channel.getQuote(searchTerm, quoteNum)
+        if quoteData is None:
+            await ctx.reply(f"No quotes for the term {searchTerm} could be found!")
+        else:
+            quote, quoteNum, totalQuotes = quoteData
+            await ctx.reply(f"{quote.quote} | Submitted By: {quote.submitter} | ({quoteNum}/{totalQuotes})")
 
 
 def prepare(bot):

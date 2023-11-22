@@ -1,6 +1,6 @@
 from twitchio.ext import commands
 
-from twitchBot import Scotbot
+from twitchBot import Scotbot, requireMod
 from twitchClasses import Channel
 
 
@@ -9,18 +9,17 @@ class PollsCog(commands.Cog):
         self.bot: Scotbot = bot
 
     @commands.command(name="pollOpen")
+    @requireMod
     async def openPoll(self, ctx: commands.Context, *args):
-        if ctx.author.is_mod:
-            channel: Channel = self.bot.channels[ctx.channel.name]
-            if channel.poll is None:
-                rawData = " ".join(args)
-                pollOptions = [option.strip() for option in rawData.split("|")]
-                options = [f"{idx + 1}: {option}" for idx, option in enumerate(pollOptions)]
-                await channel.startPoll(pollOptions)
-                self.bot.loop.create_task(channel.poll.updateLoop())
-                await ctx.reply(f"A poll has been opened! Options: {'; '.join(options)}. To enter, type '!vote 1' to vote for option 1, !vote 2 for option 2 etc")
-            else:
-                await ctx.reply(f"There is already a poll open! Please close it first")
+        channel: Channel = self.bot.channels[ctx.channel.name]
+        if channel.poll is None:
+            rawData = " ".join(args)
+            pollOptions = [option.strip() for option in rawData.split("|")]
+            options = [f"{idx + 1}: {option}" for idx, option in enumerate(pollOptions)]
+            await channel.startPoll(pollOptions)
+            await ctx.reply(f"A poll has been opened! Options: {'; '.join(options)}. To enter, type '!vote 1' to vote for option 1, !vote 2 for option 2 etc")
+        else:
+            await ctx.reply(f"There is already a poll open! Please close it first")
 
     @commands.command(name="vote")
     async def vote(self, ctx: commands.Context, *args):
@@ -35,26 +34,26 @@ class PollsCog(commands.Cog):
                 channel.poll.voters.append(ctx.author.name)
 
     @commands.command(name="pollVotes")
+    @requireMod
     async def pollVotes(self, ctx: commands.Context):
-        if ctx.author.is_mod:
-            channel: Channel = self.bot.channels[ctx.channel.name]
-            if channel.poll is not None:
-                options = [f"{key}: {value}" for key, value in channel.poll.options.items()]
-                await channel.poll.updateDB()
-                await ctx.reply(f"Results of the poll so far: {'; '.join(options)}")
-            else:
-                await ctx.reply(f"There is no poll open just now!")
+        channel: Channel = self.bot.channels[ctx.channel.name]
+        if channel.poll is not None:
+            options = [f"{key}: {value}" for key, value in channel.poll.options.items()]
+            await channel.poll.saveVotes()
+            await ctx.reply(f"Results of the poll so far: {'; '.join(options)}")
+        else:
+            await ctx.reply(f"There is no poll open just now!")
 
     @commands.command(name="pollClose")
+    @requireMod
     async def pollClose(self, ctx: commands.Context):
-        if ctx.author.is_mod:
-            channel: Channel = self.bot.channels[ctx.channel.name]
-            if channel.poll is not None:
-                options = [f"{key}: {value}" for key, value in channel.poll.options.items()]
-                await ctx.reply(f"The poll has been closed! Results: {'; '.join(options)}")
-                await channel.closePoll()
-            else:
-                await ctx.reply(f"There is no poll open just now!")
+        channel: Channel = self.bot.channels[ctx.channel.name]
+        if channel.poll is not None:
+            options = [f"{key}: {value}" for key, value in channel.poll.options.items()]
+            await ctx.reply(f"The poll has been closed! Results: {'; '.join(options)}")
+            await channel.closePoll()
+        else:
+            await ctx.reply(f"There is no poll open just now!")
 
 
 def prepare(bot):

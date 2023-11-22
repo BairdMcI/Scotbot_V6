@@ -1,7 +1,7 @@
 import asyncio
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -11,30 +11,41 @@ import twitchio
 import random
 
 from twitchio import models
+from twitchio.ext import routines
 from discord import Webhook, RequestsWebhookAdapter, Embed, Colour
 
 botImage = "https://cdn.discordapp.com/attachments/176727246160134144/491033960877391892/ScotBot5Shadow.png"
 
+
 class Giveaway:
-    def __init__(self, name: str, channelName: str, entrants=None, winners=None, isOpen: int = 1):
+    def __init__(self, name: str, channelName: str, entrants=None, winners=None, isOpen: int = 1, followersOnly: bool = False,
+                 subscribersOnly: bool = False):
         self.name: str = name
         self.channelName: str = channelName
         self.entrants: list = [] if entrants is None else json.loads(entrants)
         self.winners: list = [] if winners is None else json.loads(winners)
         self.isOpen: bool = isOpen == 1
+        self.followersOnly: bool = followersOnly
+        self.subscribersOnly: bool = subscribersOnly
 
     def __str__(self):
         return self.name
 
+    async def open(self):
+        self.isOpen = True
+        self.saveEntrants.start()
+
+    @routines.routine(seconds=10)
     async def saveEntrants(self):
         async with aiosqlite.connect(f"data/user_{self.channelName}.db") as db:
             await db.execute("UPDATE giveaways SET entrants=? WHERE keyword = ?", (json.dumps(self.entrants), self.name,))
             await db.commit()
 
-    async def saveEntrantsLoop(self):
-        while self.isOpen:
-            await self.saveEntrants()
-            await asyncio.sleep(10)
+    @saveEntrants.after_routine
+    async def finalSave(self):
+        async with aiosqlite.connect(f"data/user_{self.channelName}.db") as db:
+            await db.execute("UPDATE giveaways SET entrants=? WHERE keyword = ?", (json.dumps(self.entrants), self.name,))
+            await db.commit()
 
     async def drawWinner(self):
         if len(self.entrants) == 0:
@@ -50,16 +61,18 @@ class Giveaway:
 
     async def close(self):
         self.isOpen = False
-        await self.saveEntrants()
+        self.saveEntrants.stop()
         async with aiosqlite.connect(f"data/user_{self.channelName}.db") as db:
             await db.execute("UPDATE giveaways SET isOpen=0 WHERE keyword=?", (self.name,))
             await db.commit()
-
         return len(self.entrants) + len(self.winners)
 
     async def addToDB(self, channelName: str):
         async with aiosqlite.connect(f"data/user_{channelName}.db") as db:
-            await db.execute("INSERT OR REPLACE INTO giveaways VALUES (?, '[]', '[]', 1)", (self.name,))
+            await db.execute("INSERT OR REPLACE INTO giveaways VALUES (?, '[]', '[]', ?, ?, ?)",
+                             (self.name, 1 if self.isOpen else 0,
+                              1 if self.followersOnly else 0, 1
+                              if self.subscribersOnly else 0))
             await db.commit()
 
 
@@ -106,16 +119,27 @@ class Poll:
             await db.commit()
             self.rowid = cur.lastrowid
 
+    @routines.routine(seconds=30)
     async def updateDB(self):
+        await self.saveVotes()
+
+    @updateDB.after_routine
+    async def finalSave(self):
+        await self.saveVotes()
+
+    async def open(self):
+        self.isOpen = True
+        self.updateDB.start()
+
+    async def close(self):
+        self.isOpen = False
+        self.updateDB.stop()
+
+    async def saveVotes(self):
         async with aiosqlite.connect(f"data/user_{self.channelName}.db") as db:
             await db.execute("UPDATE polls SET options=?, voters=?, isOpen=? WHERE ROWID=?",
                              (json.dumps(self.options), json.dumps(self.voters), 1 if self.isOpen else 0, self.rowid))
             await db.commit()
-
-    async def updateLoop(self):
-        while self.isOpen:
-            await self.updateDB()
-            await asyncio.sleep(30)
 
 
 @dataclass
@@ -138,16 +162,22 @@ class Quote:
 
 
 @dataclass
-class Game:
-    id: str
-    name: str
+class SteamInfo:
     categories: str
     genres: str
     developers: str
 
 
+@dataclass
+class Game:
+    name: str
+    id: int = field(default=0)
+    image: str = field(default="")
+    steamInfo: SteamInfo = field(default=None)
+
+
 class Channel:
-    def __init__(self, name: str, id: int, webhookID: int, webhookToken: str, isLive: int, title: str = "", game: str = "", whatgame: str = "", lastStartedAt: datetime = None):
+    def __init__(self, name: str, id: int, webhookID: int, webhookToken: str, isLive: int, title: str = "", whatgame: str = "", lastOnline: datetime = None):
         self.name: str = name
         self.displayName: str = self.name
         self.id: int = id
@@ -155,13 +185,12 @@ class Channel:
         self.webhookID: int = webhookID
         self.webhookToken: str = webhookToken
         self.thumbnailURL: str = ""
-        self.gameImageURL: str = ""
 
         self.isLive: bool = isLive == 1
         self.title: str = title
-        self.game: str = game
+        self.game: Optional[Game] = None
         self.whatgame: str = whatgame
-        self.lastStartedAt: datetime = lastStartedAt
+        self.lastOnline: datetime = lastOnline
 
         self.poll: Optional[Poll] = None
         self.songs: list = []
@@ -172,8 +201,11 @@ class Channel:
 
         self.channelObj: Optional[twitchio.Channel] = None
 
+        self.giftsubs: dict = {}
+
         self.setupTables()
         self.loadFromDB()
+        self.saveChatLogs.start()
 
     def __str__(self):
         return self.name
@@ -181,7 +213,10 @@ class Channel:
     def setupTables(self):
         Path("data").mkdir(exist_ok=True)
         con = sqlite3.connect(f"data/user_{self.name}.db")
-        con.execute("CREATE TABLE IF NOT EXISTS giveaways (keyword text unique primary key, entrants text, winners text, isOpen integer)")
+        con.execute(f"CREATE TABLE IF NOT EXISTS chatlogs (date text, user text COLLATE NOCASE, message text COLLATE NOCASE)")
+        #con.execute("DROP TABLE giveaways")
+        con.execute("CREATE TABLE IF NOT EXISTS giveaways (keyword text unique primary key, entrants text, winners text, isOpen integer, "
+                    "followersOnly integer, subscribersOnly integer)")
         con.execute("CREATE TABLE IF NOT EXISTS polls (options text, voters text, isOpen integer)")
         con.execute("CREATE TABLE IF NOT EXISTS quotes (submittedAt text, submitter text collate NOCASE, quote text collate NOCASE)")
         con.execute("CREATE TABLE IF NOT EXISTS whatgames (game text collate NOCASE, title text collate NOCASE, whatgame text collate NOCASE, dateAdded text)")
@@ -192,7 +227,10 @@ class Channel:
     def loadFromDB(self):
         con = sqlite3.connect(f"data/user_{self.name}.db")
         data = con.execute("SELECT * FROM giveaways WHERE isOpen=1").fetchall()
-        self.giveaways = {giveaway[0]: Giveaway(channelName=self.name, name=giveaway[0], entrants=giveaway[1], winners=giveaway[2]) for giveaway in data}
+        self.giveaways = {giveaway[0]: Giveaway(channelName=self.name, name=giveaway[0], entrants=giveaway[1],
+                                                winners=giveaway[2],
+                                                followersOnly=giveaway[4] == 1, subscribersOnly=giveaway[5] == 1)
+                          for giveaway in data}
 
         data = con.execute("SELECT ROWID, options, voters FROM polls WHERE isOpen=1").fetchone()
         if data is not None:
@@ -207,36 +245,31 @@ class Channel:
         con.close()
 
         con = sqlite3.connect("data/generalTwitchInfo.db")
-        webhookID, webhookToken, title, game, lastLive = con.execute("SELECT webhookID, webhookToken, title, game, lastStartedAt FROM channelInfo WHERE name=?",
+        webhookID, webhookToken, title, game, isLive, lastLive = con.execute("SELECT webhookID, webhookToken, title, game, liveStatus, lastOnline FROM channelInfo WHERE name=?",
                                                                      (self.name,)).fetchone()
         self.webhookID = webhookID
         self.webhookToken = webhookToken
         self.title = title
-        self.game = game
+        self.game = Game(name=game)
+        self.isLive = isLive == 1
         if lastLive is not None:
-            self.lastStartedAt = datetime.strptime(lastLive[0], "%d/%m/%Y %H:%M:%S")
+            self.lastOnline = datetime.strptime(lastLive, "%d/%m/%Y %H:%M:%S")
         else:
-            self.lastStartedAt = None
+            self.lastOnline = None
         con.close()
 
+    @routines.routine(minutes=1)
     async def saveChatLogs(self):
         if len(self.chatLogs) > 0:
             async with aiosqlite.connect(f"data/user_{self.name}.db") as db:
-                try:
-                    await db.executemany(f"INSERT INTO chatLogs_{datetime.today().year} VALUES (?, ?, ?)", self.chatLogs)
-                except sqlite3.OperationalError:
-                    await db.execute(f"CREATE TABLE IF NOT EXISTS chatLogs_{datetime.today().year} (date text, user text, message text)")
-                    await db.executemany(f"INSERT INTO chatLogs_{datetime.today().year} VALUES (?, ?, ?)", self.chatLogs)
+                await db.executemany(f"INSERT INTO chatlogs VALUES (?, ?, ?)", self.chatLogs)
                 await db.commit()
             self.chatLogs = []
 
-    async def saveChatLogsLoop(self):
-        while True:
-            await self.saveChatLogs()
-            await asyncio.sleep(60)
-
-    async def openGiveaway(self, keyword: str) -> Giveaway:
-        giveaway = Giveaway(name=keyword, channelName=self.name)
+    async def openGiveaway(self, keyword: str, followersOnly: bool, subscribersOnly: bool) -> Giveaway:
+        keyword = keyword.lower()
+        giveaway = Giveaway(name=keyword, channelName=self.name, followersOnly=followersOnly,
+                            subscribersOnly=subscribersOnly)
         self.giveaways[keyword] = giveaway
         await giveaway.addToDB(self.name)
 
@@ -245,8 +278,8 @@ class Channel:
     async def addQuote(self, submittedAt: datetime, submitter: str, text: str) -> int:
         quote = Quote(submittedAt, submitter, text)
         quoteCount = None
-        if self.name in ["akiss4luck", "essentia_modica", "scotbotm8"]:
-            names = ["akiss4luck", "essentia_modica", "scotbotm8"]
+        if self.name in ["akiss4luck", "essentia_modica", "scotbotm8", "quill18"]:
+            names = ["akiss4luck", "essentia_modica", "scotbotm8", "quill18"]
         else:
             names = [self.name]
 
@@ -255,7 +288,7 @@ class Channel:
 
         return quoteCount
 
-    async def getQuote(self, searchTerm: Optional[str], quoteNum: Optional[int]) -> (Quote, int):
+    async def getQuote(self, searchTerm: Optional[str], quoteNum: Optional[int]) -> Optional[tuple[Quote, int, int]]:
         async with aiosqlite.connect(f"data/user_{self.name}.db") as db:
             if searchTerm is None:
                 cur = await db.execute("SELECT submittedAt, submitter, quote FROM quotes")
@@ -264,7 +297,10 @@ class Channel:
                 cur = await db.execute("SELECT submittedAt, submitter, quote FROM quotes WHERE submitter=? OR quote LIKE ?",
                                        (searchTerm, "%" + searchTerm + "%"))
                 quotes = await cur.fetchall()
+
         quotes = [Quote(datetime.strptime(quote[0], "%d/%m/%Y %H:%M:%S") if quote[0] != "unknown" else datetime(year=1, month=1, day=1), quote[1], quote[2]) for quote in quotes]
+        if len(quotes) == 0:
+            return None
         if quoteNum is None:
             quoteNum = random.randrange(0, len(quotes))
         else:
@@ -276,7 +312,7 @@ class Channel:
     async def addWhatgame(self, game: str, title: str, whatgame: str) -> bool:
         self.whatgame = whatgame
         async with aiosqlite.connect(f"data/user_{self.name}.db") as db:
-            dateAdded = datetime.now().strftime("%d/%m/%Y")
+            dateAdded = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
             exists = await db.execute("SELECT 1 FROM whatgames WHERE game=? AND title=? AND whatgame=? AND dateAdded=?", (game, title, whatgame, dateAdded,))
             if not await exists.fetchone():
                 await db.execute("INSERT INTO whatgames VALUES (?, ?, ?, ?)", (game, title, whatgame, dateAdded,))
@@ -287,11 +323,10 @@ class Channel:
 
     async def startPoll(self, options: list):
         self.poll = Poll({x: 0 for x in options}, self.name)
-        await self.poll.addToDB()
+        await self.poll.open()
 
     async def closePoll(self):
-        self.poll.isOpen = False
-        await self.poll.updateDB()
+        await self.poll.close()
         self.poll = None
 
     async def addSong(self, user: str, song: str):
@@ -312,43 +347,21 @@ class Channel:
         else:
             return None
 
-    async def checkIfLive(self, streamInfo: list[models.Stream]) -> list:
-        try:
-            streamInfo: models.Stream = streamInfo[0]
-        except IndexError:
-            # Channel must be offline
-            if self.isLive:
-                await self.updateStreamInfo(online=False)
-                return [-2, 0, 0]
-            return [-1, 0, 0]
-
-        updateLiveStatus = True if not self.isLive else False
-        updateTitle = True if self.title != streamInfo.title else False
-        updateGame = True if self.game != streamInfo.game_name else False
-
-        if any([updateLiveStatus, updateTitle, updateGame]):
-            await self.updateStreamInfo(title=streamInfo.title, game=streamInfo.game_name, online=True, lastStartedAt=datetime.now())
-
-        return [2 if updateLiveStatus else 1, updateTitle, updateGame]
-
-    async def updateStreamInfo(self, title: str = None, game: str = None, online: bool = None, lastStartedAt: datetime = None, gameImage: str = None):
-        if title is not None:
-            self.title = title
-        if game is not None:
-            self.game = game
-            self.gameImageURL = gameImage
-        if online is not None:
-            self.isLive = online
-        if lastStartedAt is not None:
-            self.lastStartedAt = lastStartedAt
-        async with aiosqlite.connect("data/generalTwitchInfo.db") as db:
-            await db.execute("UPDATE channelInfo SET liveStatus=?, title=?, game=?, lastStartedAt=? WHERE name=?",
-                             (1 if self.isLive else 0, self.title, self.game,
-                              self.lastStartedAt.strftime("%d/%m/%Y %H:%M:%S") if self.lastStartedAt is not None else None,
-                              self.name,))
+    async def updateStreamInfo(self, game: bool = False, title: bool = False, isLive: bool = False, lastOnline: bool = False):
+        async with aiosqlite.connect(f"data/generalTwitchInfo.db") as db:
+            if game:
+                await db.execute("UPDATE channelInfo SET game=? WHERE name=?", (self.game.name, self.name,))
+            if title:
+                await db.execute("UPDATE channelInfo SET title=? WHERE name=?", (self.title, self.name,))
+            if isLive:
+                await db.execute("UPDATE channelInfo SET liveStatus=? WHERE name=?", (1 if self.isLive else 0, self.name,))
+            if lastOnline:
+                await db.execute("UPDATE channelInfo SET lastOnline=? WHERE name=?", (datetime.strftime(self.lastOnline, "%d/%m/%Y %H:%M:%S"), self.name,))
             await db.commit()
 
     async def sendWebhook(self, changedGames: bool):
+        if self.webhookID is None or self.webhookToken is None:
+            return
         if not changedGames:
             header = f"{self.displayName} has gone live!"
         else:
@@ -357,12 +370,12 @@ class Channel:
         webhook = Webhook.partial(self.webhookID, self.webhookToken, adapter=RequestsWebhookAdapter())
         embed = Embed(title=header, description=f"https://www.twitch.tv/{self.displayName}", colour=Colour.purple())
         embed.add_field(name="Stream Title:", value=self.title, inline=False)
-        embed.add_field(name="Now Playing:", value=self.game, inline=False)
-        embed.set_image(url=self.gameImageURL)
+        embed.add_field(name="Now Playing:", value=self.game.name, inline=False)
+        embed.set_image(url=self.game.image)
         embed.set_footer(icon_url=botImage, text="Scotbot - Created by DeadM8 for the QEB Community")
         embed.set_thumbnail(url=self.thumbnailURL)
         if changedGames:
-            title = f"{self.name} has changed games..."
+            title = f"{self.displayName} has changed games..."
         elif self.name == "quill18":
             title = f"<@&651408409652101120>, Quill18 has gone live!"
         elif self.name in ["deadm8", "akiss4luck"]:
@@ -370,3 +383,13 @@ class Channel:
         else:
             title = f"{self.displayName} has gone live!"
         webhook.send(content=title, embed=embed)
+
+    async def sendVOD(self, VOD: models.Video):
+        if self.webhookID is None or self.webhookToken is None:
+            return
+
+        webhook = Webhook.partial(self.webhookID, self.webhookToken, adapter=RequestsWebhookAdapter())
+        embed = Embed(title="Stream VOD", description=VOD.url, colour=Colour.purple())
+        embed.add_field(name="VOD Title:", value=VOD.title)
+        embed.set_thumbnail(url=self.thumbnailURL)
+        webhook.send(content="The stream has ended. Check out the most recent VOD of the stream!", embed=embed)
